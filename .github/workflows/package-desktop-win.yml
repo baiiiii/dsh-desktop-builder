@@ -1,0 +1,142 @@
+name: Package Desktop (Windows x64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      source-repo:
+        description: '源码仓库地址'
+        required: true
+        default: 'https://github.com/deepseek-ai/deepseek-harness.git'
+        type: string
+      source-ref:
+        description: '要构建的 tag / 分支 / commit（留空 = 自动取最新 tag）'
+        required: false
+        default: ''
+        type: string
+      app-id:
+        description: '应用 ID'
+        required: true
+        default: 'com.deepseek.harness'
+        type: string
+  push:
+    tags:
+      - 'dsh-v*'
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    name: win-x64 unsigned
+    runs-on: windows-2025
+    timeout-minutes: 90
+
+    env:
+      DSH_DESKTOP_APP_ID: ${{ inputs.app-id || 'com.deepseek.harness' }}
+      SOURCE_REPO: ${{ inputs.source-repo || 'https://github.com/deepseek-ai/deepseek-harness.git' }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: 拉取源码
+        shell: pwsh
+        run: |
+          $ref = '${{ inputs.source-ref }}'
+          git clone --filter=blob:none $env:SOURCE_REPO dsh-src
+          Set-Location dsh-src
+          if ([string]::IsNullOrWhiteSpace($ref)) {
+            git fetch --tags --depth 1
+            $ref = (git tag --sort=-v:refname | Select-Object -First 1)
+            Write-Host "未指定 ref，自动选用最新 tag：$ref"
+          }
+          git checkout $ref
+          Write-Host "=== 已切换到 $(git describe --tags) ==="
+
+      - name: 打补丁 - 修复运行时冒烟测试
+        shell: pwsh
+        run: |
+          $target = 'dsh-src/apps/desktop/tests/fixtures/runtime-payload-smoke.mjs'
+          if (-not (Test-Path $target)) {
+            Write-Error "未找到目标文件 $target"
+            exit 1
+          }
+          Write-Host "替换前的 fs-ext 处理方式："
+          Select-String -Path $target -Pattern "requireRuntime\('fs-ext'\)" |
+            ForEach-Object { Write-Host "  $($_.LineNumber): $($_.Line.Trim())" }
+          Copy-Item 'patches/runtime-payload-smoke.mjs' $target -Force
+          Write-Host "替换后："
+          Select-String -Path $target -Pattern "MODULE_NOT_FOUND|fsExtOk" |
+            ForEach-Object { Write-Host "  $($_.LineNumber): $($_.Line.Trim())" }
+
+      - name: 安装 pnpm
+        shell: pwsh
+        working-directory: dsh-src
+        run: |
+          corepack enable
+          corepack install
+          pnpm --version
+
+      - name: 安装依赖
+        shell: pwsh
+        working-directory: dsh-src
+        run: pnpm install --frozen-lockfile
+
+      - name: 打包 Windows x64（未签名）
+        shell: pwsh
+        working-directory: dsh-src
+        run: pnpm run package:desktop:win:x64:unsigned
+
+      - name: 列出产物
+        shell: pwsh
+        run: |
+          $dir = 'dsh-src/apps/desktop/.desktop-build/targets/win-x64/unsigned-artifacts'
+          if (Test-Path $dir) {
+            Get-ChildItem -Recurse -File $dir |
+              Select-Object Name, @{N='MB';E={[math]::Round($_.Length/1MB,2)}} |
+              Format-Table -AutoSize
+          } else {
+            Write-Error "未找到产物目录 $dir"
+            exit 1
+          }
+
+      - name: 上传安装包
+        uses: actions/upload-artifact@v4
+        with:
+          name: dsh-desktop-win-x64-unsigned
+          path: dsh-src/apps/desktop/.desktop-build/targets/win-x64/unsigned-artifacts/**
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: 读取版本号
+        id: ver
+        shell: pwsh
+        run: |
+          $v = (Get-Content 'dsh-src/package.json' -Raw | ConvertFrom-Json).version
+          Write-Host "版本: $v"
+          "version=$v" >> $env:GITHUB_OUTPUT
+
+      - name: 发布到 Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $ver = '${{ steps.ver.outputs.version }}'
+          $tag = "dsh-desktop-v$ver"
+          $dir = 'dsh-src/apps/desktop/.desktop-build/targets/win-x64/unsigned-artifacts'
+          $exe = Get-ChildItem -Path $dir -Filter '*.exe' -File | Select-Object -First 1
+          if (-not $exe) { Write-Error "未找到 .exe 产物"; exit 1 }
+          Write-Host "发布文件: $($exe.Name)  ($([math]::Round($exe.Length/1MB,2)) MB)"
+
+          # tag 不存在则创建，已存在则复用（同一版本重新构建时覆盖资产）
+          $exists = git -C dsh-src tag -l $tag
+          if ([string]::IsNullOrWhiteSpace($exists)) {
+            Write-Host "创建 tag: $tag"
+            gh release create $tag --title "Desktop $ver (win-x64)" --notes "Windows x64 unsigned 安装包，由 GitHub Actions 自动构建。" --repo $env:GITHUB_REPOSITORY
+          } else {
+            Write-Host "Release $tag 已存在，将覆盖资产"
+          }
+          gh release upload $tag $exe.FullName --clobber --repo $env:GITHUB_REPOSITORY
