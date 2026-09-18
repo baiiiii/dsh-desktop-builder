@@ -3,20 +3,10 @@ name: Package Desktop (Windows x64)
 on:
   workflow_dispatch:
     inputs:
-      source-repo:
-        description: '源码仓库地址'
-        required: true
-        default: 'https://github.com/deepseek-ai/deepseek-harness.git'
-        type: string
       source-ref:
         description: '要构建的 tag / 分支 / commit（留空 = 自动取最新 tag）'
         required: false
         default: ''
-        type: string
-      app-id:
-        description: '应用 ID'
-        required: true
-        default: 'com.deepseek.harness'
         type: string
   push:
     tags:
@@ -32,8 +22,7 @@ jobs:
     timeout-minutes: 90
 
     env:
-      DSH_DESKTOP_APP_ID: ${{ inputs.app-id || 'com.deepseek.harness' }}
-      SOURCE_REPO: ${{ inputs.source-repo || 'https://github.com/deepseek-ai/deepseek-harness.git' }}
+      SOURCE_REPO: 'https://github.com/deepseek-ai/deepseek-harness.git'
 
     steps:
       - uses: actions/checkout@v4
@@ -55,6 +44,18 @@ jobs:
           }
           git checkout $ref
           Write-Host "=== 已切换到 $(git describe --tags) ==="
+
+      - name: 准备 .env.windows
+        shell: pwsh
+        run: |
+          $example = 'dsh-src/apps/desktop/.env.windows.example'
+          $target = 'dsh-src/apps/desktop/.env.windows'
+          if (-not (Test-Path $example)) {
+            Write-Error "未找到 $example"
+            exit 1
+          }
+          Copy-Item $example $target -Force
+          Write-Host "已复制 $example -> $target"
 
       - name: 安装 pnpm
         shell: pwsh
