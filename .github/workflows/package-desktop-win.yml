@@ -56,22 +56,6 @@ jobs:
           git checkout $ref
           Write-Host "=== 已切换到 $(git describe --tags) ==="
 
-      - name: 打补丁 - 修复运行时冒烟测试
-        shell: pwsh
-        run: |
-          $target = 'dsh-src/apps/desktop/tests/fixtures/runtime-payload-smoke.mjs'
-          if (-not (Test-Path $target)) {
-            Write-Error "未找到目标文件 $target"
-            exit 1
-          }
-          Write-Host "替换前的 fs-ext 处理方式："
-          Select-String -Path $target -Pattern "requireRuntime\('fs-ext'\)" |
-            ForEach-Object { Write-Host "  $($_.LineNumber): $($_.Line.Trim())" }
-          Copy-Item 'patches/runtime-payload-smoke.mjs' $target -Force
-          Write-Host "替换后："
-          Select-String -Path $target -Pattern "MODULE_NOT_FOUND|fsExtOk" |
-            ForEach-Object { Write-Host "  $($_.LineNumber): $($_.Line.Trim())" }
-
       - name: 安装 pnpm
         shell: pwsh
         working-directory: dsh-src
